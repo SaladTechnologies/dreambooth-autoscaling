@@ -218,6 +218,8 @@ export default {
 			
 			if (minReplicas <= 0 && activeJobs.length === 0 && (!lastTouch || !recentlyTouched)) {
 				return scaleToZero(env);
+			} else if (minReplicas > 0 && activeJobs.length === 0 && (!lastTouch || !recentlyTouched)) {
+				return scaleToReplicas(env, minReplicas);
 			} else if (activeJobs.length > 0){
 				const recentJobs = await getJobsTouchedWithin(env, threshold);
 				let replicas = Math.max(minReplicas, activeJobs.length + recentJobs.length);
