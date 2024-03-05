@@ -215,10 +215,10 @@ export default {
 
 			const minReplicas = env.MIN_REPLICAS ? parseInt(env.MIN_REPLICAS) : 0;
 			const maxReplicas = env.MAX_REPLICAS ? parseInt(env.MAX_REPLICAS) : 0;
-			
-			if (minReplicas <= 0 && activeJobs.length === 0 && (!lastTouch || !recentlyTouched)) {
+			const isIdle = activeJobs.length === 0 && (!lastTouch || !recentlyTouched);
+			if (minReplicas <= 0 && isIdle) {
 				return scaleToZero(env);
-			} else if (minReplicas > 0 && activeJobs.length === 0 && (!lastTouch || !recentlyTouched)) {
+			} else if (minReplicas > 0 && isIdle) {
 				return scaleToReplicas(env, minReplicas);
 			} else if (activeJobs.length > 0){
 				const recentJobs = await getJobsTouchedWithin(env, threshold);
