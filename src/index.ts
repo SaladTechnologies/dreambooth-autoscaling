@@ -7,11 +7,10 @@ async function getNumFailuresForInstance(env: Env, machineId: string) {
 }
 
 async function getActiveJobs(env: Env): Promise<ActiveJob[]> {
-	console.log('getting active jobs');
+	// console.log('getting active jobs');
 	const { results } = await env.DB.prepare(
-		"SELECT status, created_at, completed_at, last_heartbeat FROM TrainingJobs WHERE status IN ('running', 'pending')"
-	).all();
-	console.log(results.length, 'active jobs');
+		"SELECT status, created_at, completed_at, last_heartbeat FROM TrainingJobs WHERE status IN ('running', 'pending') LIMIT ?;"
+	).bind(parseInt(env.MAX_REPLICAS)).all();
 	return results as ActiveJob[];
 }
 
@@ -24,9 +23,9 @@ LIMIT 1;
 `;
 
 async function getLastTouchedJob(env: Env): Promise<LastTouchedJob | null> {
-	console.log('getting last touched job');
+	// console.log('getting last touched job');
 	const { results } = await env.DB.prepare(lastTouchedQuery).all();
-	console.log('last touched job', !!results.length);
+	// console.log('last touched job', !!results.length);
 	if (results.length === 0) {
 		return null;
 	}
@@ -41,9 +40,9 @@ AND COALESCE(completed_at, failed_at, canceled_at, last_heartbeat) > datetime('n
 `;
 
 async function getJobsTouchedWithin(env: Env, minutes: number): Promise<LastTouchedJob[]> {
-	console.log('getting jobs touched within', minutes);
+	// console.log('getting jobs touched within', minutes);
 	const { results } = await env.DB.prepare(recentlyTouchedQuery).bind(minutes).all();
-	console.log(results.length, 'jobs touched within', minutes, 'minutes');
+	// console.log(results.length, 'jobs touched within', minutes, 'minutes');
 	return results as LastTouchedJob[];
 }
 
@@ -68,6 +67,7 @@ async function reallocateBadInstances(env: Env) {
 }
 
 async function scaleToReplicas(env: Env, replicas: number) {
+	console.log('scaling to', replicas);
 	const group = await getContainerGroup(env);
 	const {
 		current_state: { status },
@@ -81,7 +81,6 @@ async function scaleToReplicas(env: Env, replicas: number) {
 		return; // Already at the desired number of replicas.
 	}
 	const url = `https://api.salad.com/api/public/organizations/${env.SALAD_ORG}/projects/${env.SALAD_PROJECT}/containers/${env.SALAD_CONTAINER_GROUP}`;
-	console.log('scaling to', replicas);
 	console.log('PATCH', url);
 	const response = await fetch(url, {
 		method: 'PATCH',
@@ -130,9 +129,16 @@ export default {
 			} else if (minReplicas > 0 && isIdle) {
 				return scaleToReplicas(env, minReplicas);
 			} else if (activeJobs.length > 0) {
-				const recentJobs = await getJobsTouchedWithin(env, threshold);
-				let replicas = Math.max(minReplicas, activeJobs.length + recentJobs.length);
+				let replicas = Math.max(minReplicas, activeJobs.length);
 				replicas = Math.min(maxReplicas, replicas);
+
+				// We only need this check if we're not already at the max replicas
+				if (replicas < maxReplicas) {
+					const recentJobs = await getJobsTouchedWithin(env, threshold);
+					replicas += recentJobs.length;
+					replicas = Math.min(maxReplicas, replicas);
+				}
+				
 				return scaleToReplicas(env, replicas);
 			}
 		} catch (e) {
