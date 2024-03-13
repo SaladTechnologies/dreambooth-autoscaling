@@ -64,6 +64,7 @@ export async function reallocateInstance(env: Env, machineId: string) {
 	if (!response.ok && response.status !== 404) {
 		throw new Error(`Failed to reallocate instance: ${response.status}: ${response.statusText}`);
 	}
+    console.log('reallocated instance', machineId);
 }
 
 export async function listContainerGroupInstances(env: Env): Promise<InstanceList> {
