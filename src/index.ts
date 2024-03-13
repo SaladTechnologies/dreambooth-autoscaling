@@ -1,64 +1,10 @@
+import { ActiveJob, Env, LastTouchedJob } from './types';
+import { listContainerGroupInstances, reallocateInstance, scaleToZero, startContainerGroup, getContainerGroup } from './salad';
 
-export interface Env {
-	DB: D1Database;
-	SALAD_API_KEY: string;
-	SALAD_ORG: string;
-	SALAD_PROJECT: string;
-	SALAD_CONTAINER_GROUP: string;
-	SCALE_TO_ZERO_MINUTES: string;
-	MIN_REPLICAS: string | undefined;
-	MAX_REPLICAS: string | undefined;
+async function getNumFailuresForInstance(env: Env, machineId: string) {
+	const { keys } = await env.BANNED_WORKERS.list({ prefix: machineId });
+	return keys.length;
 }
-
-type ContainerConfig = {
-	image: string;
-	resources: {
-		cpu: number;
-		memory: number;
-		gpu_classes: string[];
-		storage_amount: number;
-	};
-	command: string[];
-	size: number;
-	environment_variables: {
-		API_URL: string;
-		API_KEY: string;
-		WANDB_API_KEY: string;
-	};
-};
-
-type CurrentState = {
-	status: 'pending' | 'running' | 'stopped' | 'succeeded' | 'failed' | 'deploying'; // Assuming status is a fixed set of strings, you can replace 'stopped' with a union of possible status strings if there are more (e.g., 'running' | 'stopped' | 'pending').
-	description: string;
-	start_time: string; // Using string to represent ISO date-time strings; consider using Date or a more specific date-time library type if desired.
-	finish_time: string; // Similarly, using string to represent ISO date-time strings.
-	instance_status_count: {
-		allocating_count: number;
-		creating_count: number;
-		running_count: number;
-	};
-};
-
-type ContainerGroup = {
-	id: string;
-	name: string;
-	display_name: string;
-	container: ContainerConfig;
-	autostart_policy: boolean;
-	restart_policy: 'always' | 'on_failure' | 'never';
-	replicas: number;
-	current_state: CurrentState;
-	create_time: string; // Using string to represent ISO date-time strings; consider using Date or a more specific date-time library type if desired.
-	update_time: string; // Similarly, using string to represent ISO date-time strings.
-	version: number;
-};
-
-type ActiveJob = {
-	status: string;
-	created_at: string;
-	completed_at: string;
-	last_heartbeat: string;
-};
 
 async function getActiveJobs(env: Env): Promise<ActiveJob[]> {
 	console.log('getting active jobs');
@@ -69,21 +15,13 @@ async function getActiveJobs(env: Env): Promise<ActiveJob[]> {
 	return results as ActiveJob[];
 }
 
-type LastTouchedJob = {
-	status?: string;
-	last_heartbeat?: string;
-	completed_at?: string;
-	failed_at?: string;
-	canceled_at?: string;
-};
-
 const lastTouchedQuery = `
 SELECT last_heartbeat, completed_at, failed_at, canceled_at
 FROM TrainingJobs
 WHERE status NOT IN ('running', 'pending')
 ORDER BY COALESCE(completed_at, failed_at, canceled_at, last_heartbeat) DESC
 LIMIT 1;
-`
+`;
 
 async function getLastTouchedJob(env: Env): Promise<LastTouchedJob | null> {
 	console.log('getting last touched job');
@@ -100,7 +38,7 @@ SELECT status, created_at, completed_at, failed_at, canceled_at, last_heartbeat
 FROM TrainingJobs
 WHERE status NOT IN ('running', 'pending')
 AND COALESCE(completed_at, failed_at, canceled_at, last_heartbeat) > datetime('now', '-' || ? || ' minutes')
-`
+`;
 
 async function getJobsTouchedWithin(env: Env, minutes: number): Promise<LastTouchedJob[]> {
 	console.log('getting jobs touched within', minutes);
@@ -109,53 +47,24 @@ async function getJobsTouchedWithin(env: Env, minutes: number): Promise<LastTouc
 	return results as LastTouchedJob[];
 }
 
-async function getContainerGroup(env: Env): Promise<ContainerGroup> {
-	const baseURL = `https://api.salad.com/api/public/organizations/${env.SALAD_ORG}/projects/${env.SALAD_PROJECT}/containers/${env.SALAD_CONTAINER_GROUP}`;
-	const response = await fetch(baseURL, {
-		headers: {
-			'Salad-Api-Key': env.SALAD_API_KEY,
-		},
-	});
-	if (!response.ok) {
-		throw new Error(`Failed to fetch from Salad API: ${response.status}: ${response.statusText}`);
-	}
-	const group = (await response.json()) as ContainerGroup;
-	return group;
-}
-
-async function scaleToZero(env: Env) {
-	const group = await getContainerGroup(env);
-	const {
-		current_state: { status },
-	} = group;
-	if (['stopped', 'failed'].includes(status)) {
-		return; // Already stopped or failed, no need to do anything.
-	}
-	const url = `https://api.salad.com/api/public/organizations/${env.SALAD_ORG}/projects/${env.SALAD_PROJECT}/containers/${env.SALAD_CONTAINER_GROUP}/stop`;
-	const stopResponse = await fetch(url, {
-		method: 'POST',
-		headers: {
-			'Salad-Api-Key': env.SALAD_API_KEY,
-		},
-	});
-	if (!stopResponse.ok) {
-		throw new Error(`Failed to stop container group: ${stopResponse.status}: ${stopResponse.statusText}`);
-	}
-	return;
-}
-
-async function startContainerGroup(env: Env) {
-	const url = `https://api.salad.com/api/public/organizations/${env.SALAD_ORG}/projects/${env.SALAD_PROJECT}/containers/${env.SALAD_CONTAINER_GROUP}/start`;
-	const startResponse = await fetch(url, {
-		method: 'POST',
-		headers: {
-			'Salad-Api-Key': env.SALAD_API_KEY,
-		},
-	});
-	if (!startResponse.ok) {
-		throw new Error(`Failed to start container group: ${startResponse.status}: ${startResponse.statusText}`);
-	}
-	return;
+async function reallocateBadInstances(env: Env) {
+	const { instances } = await listContainerGroupInstances(env);
+	const maxFailures = parseInt(env.MAX_FAILURES_PER_WORKER);
+	let badInstances = await Promise.all(
+		instances.map(async (instance) => {
+			const numFailures = await getNumFailuresForInstance(env, instance.machine_id);
+			if (numFailures >= maxFailures) {
+				return instance.machine_id;
+			}
+		})
+	);
+	await Promise.all(
+		badInstances
+			.filter((id) => id)
+			.map(async (id) => {
+				await reallocateInstance(env, id as string);
+			})
+	);
 }
 
 async function scaleToReplicas(env: Env, replicas: number) {
@@ -179,7 +88,7 @@ async function scaleToReplicas(env: Env, replicas: number) {
 		headers: {
 			'Salad-Api-Key': env.SALAD_API_KEY,
 			'Content-Type': 'application/merge-patch+json',
-			'Accept': 'application/json'
+			Accept: 'application/json',
 		},
 		body: JSON.stringify({
 			replicas,
@@ -220,7 +129,7 @@ export default {
 				return scaleToZero(env);
 			} else if (minReplicas > 0 && isIdle) {
 				return scaleToReplicas(env, minReplicas);
-			} else if (activeJobs.length > 0){
+			} else if (activeJobs.length > 0) {
 				const recentJobs = await getJobsTouchedWithin(env, threshold);
 				let replicas = Math.max(minReplicas, activeJobs.length + recentJobs.length);
 				replicas = Math.min(maxReplicas, replicas);
@@ -229,5 +138,6 @@ export default {
 		} catch (e) {
 			console.log(e);
 		}
+		await reallocateBadInstances(env);
 	},
 };
